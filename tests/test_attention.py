@@ -1,6 +1,6 @@
 import pytest
 import torch
-from einops import einsum, rearrange
+from einops import einsum
 
 from .adapters import (
     get_flashattention_autograd_function_pytorch,
@@ -51,7 +51,7 @@ def _test_flash_forward_pass(impl, device="cpu", is_causal=False):
     assert len(maybe_ls) == 1, (
         f"Expected one tensor of shape {q.shape[0], q.shape[1]} in saved tensors, but found {len(maybe_ls)}. The tests require you to save exactly one tensor of this shape, corresponding to the log-sum-exp of the attention scores."
     )
-    l = maybe_ls[0]
+    l = maybe_ls[0] # noqa: E741
 
     o_ref, l_ref = _attention_and_lse(q, k, v, is_causal)
 

@@ -3,7 +3,6 @@ import numpy as np
 import pytest
 import os
 from pathlib import Path
-import torch
 from torch import Tensor
 import pickle
 
@@ -14,7 +13,7 @@ def pytest_addoption(parser):
 _A = TypeVar("_A", np.ndarray, Tensor)
 
 
-def _canonicalize_array(arr: _A) -> np.ndarray:
+def _canonicalize_array(arr: _A) -> np.ndarray: # noqa: UP047
     if isinstance(arr, Tensor):
         arr = arr.detach().cpu().numpy()
     return arr
