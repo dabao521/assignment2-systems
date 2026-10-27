@@ -1,0 +1,4 @@
+Generating SQLite file /data/transformer_profile.sqlite from /data/transformer_profile.nsys-rep
+Processing [/data/transformer_profile.sqlite] with [/opt/nvidia/nsight-systems-cli/2026.5.1/target-linux-x64/reports/cuda_gpu_mem_size_sum.py]... 
+SKIPPED: /data/transformer_profile.sqlite does not contain GPU memory data.
+

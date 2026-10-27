@@ -1,0 +1,15 @@
+Generating SQLite file /data/transformer_profile.sqlite from /data/transformer_profile.nsys-rep
+Processing [/data/transformer_profile.sqlite] with [/opt/nvidia/nsight-systems-cli/2026.5.1/target-linux-x64/reports/cuda_api_sum.py]... 
+
+ ** CUDA API Summary (cuda_api_sum):
+
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)          Name         
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ---------------------
+     80.8         39167127       3798   10312.6    9610.0      6420     98872       3233.2  cudaLaunchKernel     
+     15.0          7271875        578   12581.1   12230.0      9110     50020       3213.5  cuLaunchKernelEx     
+      3.2          1575095       3798     414.7     371.0       190     19081        476.6  cuKernelGetName      
+      0.7           344878       1156     298.3     325.0        89     17410        538.4  cuKernelGetAttribute 
+      0.1            66932          5   13386.4   10120.0      8211     22231       6050.1  cudaDeviceSynchronize
+      0.1            38720          8    4840.0     640.0       280     33530      11605.6  cudaStreamIsCapturing
+      0.1            29641          1   29641.0   29641.0     29641     29641          0.0  cuProfilerStart      
+
