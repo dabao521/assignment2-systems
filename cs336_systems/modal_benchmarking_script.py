@@ -153,6 +153,29 @@ def mixed_precision() -> None:
     finally:
         volume.commit()
 
+@app.function(
+    image=image,
+    gpu="H200",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def gradient_checkpointing() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "python",
+        "-u",
+        "cs336_systems/gradient_checkpointing.py",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+
+
 @app.local_entrypoint()
 def main(
     mode: str,
