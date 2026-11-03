@@ -176,6 +176,80 @@ def gradient_checkpointing() -> None:
         volume.commit()
 
 
+@app.function(
+    image=image,
+    gpu="H200",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def pytorch_attention() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "python",
+        "-u",
+        "cs336_systems/pytorch_attention.py",
+        "--mode=backward"
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+
+@app.function(
+    image=image,
+    gpu="H200",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def test_flash_attention() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "uv",
+        "run",
+        "pytest",
+        "-k",
+        "test_flash_forward_pass_pytorch",
+        "-v",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+
+@app.function(
+    image=image,
+    gpu="H200",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def test_flash_attention_triton() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "uv",
+        "run",
+        "pytest",
+        "-k",
+        "test_flash_forward_pass_triton",
+        "-v",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+
+
 @app.local_entrypoint()
 def main(
     mode: str,
