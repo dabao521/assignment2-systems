@@ -230,7 +230,7 @@ def test_flash_attention() -> None:
     volumes={"/data": volume},
     timeout=7200,
 )
-def test_flash_attention_triton() -> None:
+def test_flash_attention_forward_triton() -> None:
     import os
 
     os.chdir("/app")
@@ -241,6 +241,56 @@ def test_flash_attention_triton() -> None:
         "pytest",
         "-k",
         "test_flash_forward_pass_triton",
+        "-v",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+
+@app.function(
+    image=image,
+    gpu="H200",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def test_flash_attention_backward_pytorch() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "uv",
+        "run",
+        "pytest",
+        "-k",
+        "test_flash_backward_pytorch",
+        "-v",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+
+@app.function(
+    image=image,
+    gpu="H200",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def test_flash_attention_backward_triton() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "uv",
+        "run",
+        "pytest",
+        "-k",
+        "test_flash_backward_triton",
         "-v",
     ]
 
