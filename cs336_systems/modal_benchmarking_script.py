@@ -205,7 +205,7 @@ def pytorch_attention() -> None:
     volumes={"/data": volume},
     timeout=7200,
 )
-def test_flash_attention() -> None:
+def test_flash_attention_forward_pytorch() -> None:
     import os
 
     os.chdir("/app")
@@ -292,6 +292,31 @@ def test_flash_attention_backward_triton() -> None:
         "-k",
         "test_flash_backward_triton",
         "-v",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+
+@app.function(
+    image=image,
+    gpu="B200",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def flash_benchmarking() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "uv",
+        "run",
+        "python",
+        "-u",
+        "cs336_systems/flash_benchmarking.py",
+        "--mode=backward"
     ]
 
     try:

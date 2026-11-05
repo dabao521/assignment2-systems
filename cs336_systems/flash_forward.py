@@ -13,6 +13,7 @@ def flash_forward_attention_kernel(
     q_tile_index: int,
     bq: int,
     bk: int,
+    is_causal: bool,
 ) -> tuple[Float[Tensor, " ... bq d"], Float[Tensor, " ... bq"]]:
     """
     this kernel is resonsible for a part of output matrix with size (Bq, d).
@@ -40,6 +41,7 @@ def flash_forward_attention_kernel(
     q_row_start = q_tile_index * bq
     q: Float[Tensor, " ... bq d"] = Q[...,q_row_start:q_row_start+bq, :]
 
+    q_indices = q_tile_index * bq + torch.arange(bq, device=Q.device)
     # iterate each k tiles and update running max , running sum and running
     # output sub matrix.
     for j in range(triton.cdiv(nk, bk)):
@@ -53,6 +55,11 @@ def flash_forward_attention_kernel(
             k,
             "... bq d, ... bk d -> ... bq bk",
         ) / math.sqrt(d)
+
+        if is_causal:
+            k_indices = j * bk + torch.arange(k.shape[-2], device=K.device)
+            mask = q_indices[:,None] < k_indices[None,:]
+            s = s.masked_fill(mask, float("-inf"))
 
         # compute m = max(m_old, rowmax(s)) 
         # we keep the old m to do the rescale later
@@ -72,8 +79,8 @@ def flash_forward_attention_kernel(
         # to (bq, bk) by column copies. then element multiply to o
         # since each scale row only effects the same row of matrix o.
         o = scale[...,:,None] * o + einsum(
-                p,
-                v,
+                p.to(torch.float32),
+                v.to(torch.float32),
                 "... bq bk, ... bk d -> ... bq d",
                 )
         m = m_new
@@ -91,7 +98,8 @@ def flash_attention_backward_pytorch(
     V: Float[Tensor, " ... nk d"],
     Out: Float[Tensor, " ... nq d"],
     dO: Float[Tensor, " ... nq d"],
-    L: Float[Tensor, " ... nq"]
+    L: Float[Tensor, " ... nq"],
+    is_causal: bool,
 ) -> tuple[
     Float[Tensor, " ... nq d"],
     Float[Tensor, " ... nk d"],
@@ -101,6 +109,8 @@ def flash_attention_backward_pytorch(
     Now following the equation 13-19 to compute the QKV derivatives
     """
     d: int = Q.shape[-1]
+    nq: int = Q.shape[-2]
+    nk: int = K.shape[-2]
     scale: float = 1.0 / math.sqrt(d)
 
     # Equation 13: compute activation S
@@ -110,20 +120,26 @@ def flash_attention_backward_pytorch(
         "... nq d, ... nk d -> ... nq nk",
     ) * scale
 
+    if is_causal:
+        q_indices = torch.arange(nq, device=Q.device)
+        k_indices = torch.arange(nk, device=Q.device)
+        mask = q_indices[:,None] < k_indices[None,:]
+        S = S.masked_fill(mask, float("-inf"))
+
     # Equation 14: compute activation P after softmax on S
     P: Float[Tensor, " ... nq nk"] = torch.exp(S - L[...,None])
 
     # Equation 15: now coppute dV
     dV: Float[Tensor, " ... nk d"] = einsum(
         P,
-        dO,
+        dO.to(P.dtype),
         "... nq nk, ... nq d -> ... nk d",
     )
 
     # Equation 16: compute dP backward matrix for next steps
     dP: Float[Tensor, " ... nq nk"] = einsum(
         dO,
-        V,
+        V.to(dO.dtype),
         "... nq d, ... nk d -> ... nq nk"
     )
 
@@ -135,18 +151,18 @@ def flash_attention_backward_pytorch(
     # Equation 18: compute dQ
     dQ: Float[Tensor, " ... nq d"] = einsum(
         dS,
-        K,
+        K.to(dS.dtype),
         "... nq nk, ... nk d -> ... nq d",
     ) * scale
 
     # Equation 19 : compute dK
     dK: Float[Tensor, " ... nk d"] = einsum(
         dS,
-        Q,
+        Q.to(dS.dtype),
         "... nq nk, ... nq d -> ... nk d",
     ) * scale
 
-    return dQ, dK, dV
+    return dQ.to(Q.dtype), dK.to(K.dtype), dV.to(V.dtype)
     
 
 
@@ -158,9 +174,9 @@ class FlashAttentionForwardPyTorchFunc(torch.autograd.Function):
         K: Float[Tensor, " ... nk d"],
         V: Float[Tensor, " ... nk d"],
         is_causal=False,
+        bq= 32,
+        bk=32,
     ) -> Float[Tensor, " ... nq d"]:
-        bq: int = 32
-        bk: int = 32
 
         *_, nq, d = Q.shape
 
@@ -177,23 +193,26 @@ class FlashAttentionForwardPyTorchFunc(torch.autograd.Function):
                 i,
                 bq,
                 bk,
+                is_causal,
             )
             o_tiles.append(o_tile)
             l_tiles.append(l_tile)
 
-        o = torch.cat(o_tiles, dim=-2)
+        o = torch.cat(o_tiles, dim=-2).to(Q.dtype)
         l_sum = torch.cat(l_tiles, dim=-1)
 
         ctx.save_for_backward(l_sum, Q, K, V, o)
         ctx.is_causal = is_causal
+        ctx.bk=bk
+        ctx.bq=bq
         return o
 
     @staticmethod
     def backward(ctx, grad_out):
         # load the stored input matrix from the forward pass.
         L, Q, K, V, Out = ctx.saved_tensors
-        dQ, dK, dV = flash_attention_backward_pytorch(Q,K,V,Out,grad_out,L)
-        return dQ, dK, dV, None
+        dQ, dK, dV = flash_attention_backward_pytorch(Q,K,V,Out,grad_out,L,ctx.is_causal)
+        return dQ, dK, dV, None, None, None
 
 @triton.jit
 def flash_forward_kernel(
@@ -588,11 +607,9 @@ def flash_backward_triton_q_kernel(
 
 class FlashAttentionTritonFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q, K, V, is_causal=False):
+    def forward(ctx, Q, K, V, is_causal=False, Q_TILE_SIZE=32, K_TILE_SIZE=32):
         batch_size, N_QUERIES, D = Q.shape
         N_KEYS = K.shape[1]
-        Q_TILE_SIZE = 32
-        K_TILE_SIZE = 32
 
         out = torch.empty((batch_size, N_QUERIES, D), device=Q.device, dtype=Q.dtype)
         L = torch.empty((batch_size, N_QUERIES), device=Q.device, dtype=Q.dtype)
@@ -615,6 +632,8 @@ class FlashAttentionTritonFunc(torch.autograd.Function):
         )
         ctx.save_for_backward(L, Q, K, V, out)
         ctx.is_causal = is_causal
+        ctx.Q_TILE_SIZE = Q_TILE_SIZE
+        ctx.K_TILE_SIZE = K_TILE_SIZE
         return out
     
     @staticmethod
@@ -622,8 +641,8 @@ class FlashAttentionTritonFunc(torch.autograd.Function):
         L,Q,K,V,Out = ctx.saved_tensors
         batch_size, N_QUERIES, D = Q.shape
         N_KEYS = K.shape[1]
-        Q_TILE_SIZE = 32
-        K_TILE_SIZE = 32
+        Q_TILE_SIZE = ctx.Q_TILE_SIZE
+        K_TILE_SIZE = ctx.K_TILE_SIZE
 
         # compute Dvs for backward
         Dvs = torch.sum(Out * grad_out, dim=-1) # (batch_size, N_QUERIES)
@@ -676,5 +695,5 @@ class FlashAttentionTritonFunc(torch.autograd.Function):
             ctx.is_causal,
         )
 
-        return dQ, dK, dV, None
+        return dQ, dK, dV, None, None, None
 
