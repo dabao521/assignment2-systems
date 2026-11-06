@@ -324,6 +324,52 @@ def flash_benchmarking() -> None:
     finally:
         volume.commit()
 
+@app.function(
+    image=image,
+    gpu="A100",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def test_naive_dpp() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "uv",
+        "run",
+        "pytest",
+        "-k",
+        "tests/test_ddp.py",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
+@app.function(
+    image=image,
+    gpu="H100:2",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def benchmark_naive_ddp() -> None:
+    import os
+
+    os.chdir("/app")
+
+    command: list[str] = [
+        "uv",
+        "run",
+        "python",
+        "-u",
+        "cs336_systems/naive_ddp_benchmarking.py",
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        volume.commit()
 
 @app.local_entrypoint()
 def main(

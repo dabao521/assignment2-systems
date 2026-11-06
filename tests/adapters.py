@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import torch
-from cs336_systems.flash_forward import FlashAttentionForwardPyTorchFunc, FlashAttentionTritonFunc
+from cs336_systems.naive_ddp import NaiveDDPModel
 
 
 
 def get_flashattention_autograd_function_pytorch() -> type:
+    from cs336_systems.flash_forward import FlashAttentionForwardPyTorchFunc
+
     """
     Returns a torch.autograd.Function subclass that implements FlashAttention2.
     The expectation is that this class will implement FlashAttention2
@@ -20,6 +22,8 @@ def get_flashattention_autograd_function_pytorch() -> type:
 
 
 def get_flashattention_autograd_function_triton() -> type:
+    from cs336_systems.flash_forward import FlashAttentionTritonFunc
+
     """
     Returns a torch.autograd.Function subclass that implements FlashAttention2
     using Triton kernels.
@@ -53,7 +57,7 @@ def get_ddp(module: torch.nn.Module) -> torch.nn.Module:
         Instance of a DDP class.
     """
     # For example: return DDP(module)
-    raise NotImplementedError
+    return NaiveDDPModel(module)
 
 
 def ddp_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
@@ -68,7 +72,8 @@ def ddp_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Opt
             Optimizer being used with the DDP-wrapped model.
     """
     # For example: ddp_model.finish_gradient_synchronization()
-    raise NotImplementedError
+    assert isinstance(ddp_model, NaiveDDPModel)
+    return ddp_model.ddp_backward()
 
 
 def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) -> torch.nn.Module:
