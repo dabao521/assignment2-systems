@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import torch
-from cs336_systems.naive_ddp import NaiveDDPModel
+# from cs336_systems.naive_ddp import NaiveDDPModel
+from cs336_systems.ddp_overlap_model import DdpOverlapModel
 
 
 
@@ -57,7 +58,8 @@ def get_ddp(module: torch.nn.Module) -> torch.nn.Module:
         Instance of a DDP class.
     """
     # For example: return DDP(module)
-    return NaiveDDPModel(module)
+    # return NaiveDDPModel(module)
+    return DdpOverlapModel(module)
 
 
 def ddp_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
@@ -72,8 +74,9 @@ def ddp_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Opt
             Optimizer being used with the DDP-wrapped model.
     """
     # For example: ddp_model.finish_gradient_synchronization()
-    assert isinstance(ddp_model, NaiveDDPModel)
-    return ddp_model.ddp_backward()
+    assert isinstance(ddp_model, DdpOverlapModel)
+    # return ddp_model.ddp_backward()
+    return ddp_model.finish_gradient_synchronization()
 
 
 def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) -> torch.nn.Module:

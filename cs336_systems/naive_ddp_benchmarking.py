@@ -7,7 +7,8 @@ from tests.common import (
     _setup_process_group,
 )
 import time
-from cs336_systems.naive_ddp import NaiveDDPModel
+# from cs336_systems.naive_ddp import NaiveDDPModel
+from cs336_systems.ddp_overlap_model import DdpOverlapModel
 import torch.optim as optim
 from cs336_basics.model import BasicsTransformerLM
 
@@ -25,7 +26,7 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
     dist.barrier()
     print(f"device: {device}")
 
-    model = NaiveDDPModel(BasicsTransformerLM(
+    model = DdpOverlapModel(BasicsTransformerLM(
         vocab_size=vocab_size,
         context_length=context_length,
         d_model=2560,
@@ -54,7 +55,8 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
         )
         loss.backward()
         optimizer.step()
-        model.ddp_backward()
+        # model.ddp_backward()
+        model.finish_gradient_synchronization()
 
     sync_if_gpu()
     dist.barrier()
@@ -73,7 +75,8 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
 
         sync_if_gpu()
         backward_start_time = time.time()
-        model.ddp_backward()
+        # model.ddp_backward()
+        model.finish_gradient_synchronization()
         sync_if_gpu()
         backward_timings.append(time.time() - backward_start_time)
 
