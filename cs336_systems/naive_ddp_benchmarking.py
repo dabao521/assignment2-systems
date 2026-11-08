@@ -8,9 +8,10 @@ from tests.common import (
 )
 import time
 # from cs336_systems.naive_ddp import NaiveDDPModel
-from cs336_systems.ddp_overlap_model import DdpOverlapModel
+# from cs336_systems.ddp_overlap_model import DdpOverlapModel
 import torch.optim as optim
 from cs336_basics.model import BasicsTransformerLM
+# from cs336_systems.state_shard_optimizer import StateShardOptimizer
 
 def get_data(batch_size, context_len, vocab_size):
     data = torch.randint(0, vocab_size, (batch_size, context_len))
@@ -21,12 +22,42 @@ def sync_if_gpu():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
+def report_memory(rank, label: str):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        current = torch.cuda.memory_allocated() // 1024**2
+        peak = torch.cuda.max_memory_allocated() // 1024**2
+        print(f"[rank={rank}] {label}: current={current:.2f} MiB, peak={peak:.2f} MiB")
+
+def report_memory_breakdown(rank, model, optimizer):
+    param_bytes = sum(
+        p.numel() * p.element_size()
+        for p in model.parameters()
+    ) // 1024**2
+
+    grad_bytes = sum(
+        p.grad.numel() * p.grad.element_size()
+        for p in model.parameters()
+        if p.grad is not None
+    ) // 1024**2
+
+    state_bytes = sum(
+        t.numel() * t.element_size()
+        for state in optimizer.state.values()
+        for t in state.values()
+        if isinstance(t, torch.Tensor)
+    ) // 1024**2
+    print(f"[rank={rank}] param bytes={param_bytes:.2f} MiB, grad bytes={grad_bytes:.2f} MiB, state bytes={state_bytes:.2f} MiB")
+
 def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
     device = _setup_process_group(rank, world_size=world_size, backend="nccl")
     dist.barrier()
     print(f"device: {device}")
 
-    model = DdpOverlapModel(BasicsTransformerLM(
+    sync_if_gpu()
+    torch.cuda.reset_peak_memory_stats()
+
+    model = BasicsTransformerLM(
         vocab_size=vocab_size,
         context_length=context_length,
         d_model=2560,
@@ -34,9 +65,25 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
         num_layers=32,
         num_heads=32,
         rope_theta=10000.0,
-    ).to(device)).to(device)
+    ).to(device)
 
-    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    # optimizer_cls = optim.AdamW
+    # optimizer = StateShardOptimizer(
+    #     model.parameters(),
+    #     optimizer_cls,
+    #     lr=0.1,
+    #     weight_decay=0.1,
+    #     betas=(0.9, 0.999),
+    #     eps=1e-8,
+    # )
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=0.1,
+        weight_decay=0.1,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+    )
+    report_memory(rank, "After initialization")
 
     batch_size = data.shape[0]
     local_batch_size = batch_size // world_size
@@ -56,7 +103,7 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
         loss.backward()
         optimizer.step()
         # model.ddp_backward()
-        model.finish_gradient_synchronization()
+        # model.finish_gradient_synchronization()
 
     sync_if_gpu()
     dist.barrier()
@@ -64,7 +111,7 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
     # test runs
     backward_timings = []
     start_time = time.time()
-    for _ in range(5):
+    for i in range(5):
         optimizer.zero_grad()
         outputs = model(data)
         loss = nn.functional.cross_entropy(
@@ -76,11 +123,18 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
         sync_if_gpu()
         backward_start_time = time.time()
         # model.ddp_backward()
-        model.finish_gradient_synchronization()
+        # model.finish_gradient_synchronization()
         sync_if_gpu()
         backward_timings.append(time.time() - backward_start_time)
 
+        report_memory(rank, "Before Step")
         optimizer.step()
+        report_memory(rank, "After Step")
+
+        if i == 0:
+            # report_memory_breakdown(rank, model, optimizer.optimizer)
+            report_memory_breakdown(rank, model, optimizer)
+
     elapsed = (time.time() - start_time) / 5
     backward_elapsed = sum(backward_timings) / 5
     dist.barrier()

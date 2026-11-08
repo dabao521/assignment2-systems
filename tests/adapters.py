@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 # from cs336_systems.naive_ddp import NaiveDDPModel
 from cs336_systems.ddp_overlap_model import DdpOverlapModel
+from cs336_systems.state_shard_optimizer import StateShardOptimizer
 
 
 
@@ -143,4 +144,4 @@ def get_sharded_optimizer(params, optimizer_cls: type[torch.optim.Optimizer], **
     Returns:
         Instance of sharded optimizer.
     """
-    raise NotImplementedError
+    return StateShardOptimizer(params, optimizer_cls, **kwargs)
