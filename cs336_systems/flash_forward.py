@@ -300,7 +300,18 @@ def flash_forward_kernel(
 
     # iterate each k tiles and update the running max Mi, running sum Li and running
     # output Oi.
-    for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+    if is_causal:
+        num_k_tiles = tl.minimum(
+            tl.cdiv(N_KEYS, K_TILE_SIZE),
+            tl.cdiv(
+                (query_tile_index + 1) * Q_TILE_SIZE,
+                K_TILE_SIZE,
+            ),
+        )
+    else:
+        num_k_tiles = tl.cdiv(N_KEYS, K_TILE_SIZE)
+
+    for j in range(num_k_tiles):
         # load Kj and Vj
         Kj = tl.load(K_block_ptr, boundary_check=(0,1), padding_option="zero") # (K_TILE_SIZE, D)
         Vj = tl.load(V_block_ptr, boundary_check=(0,1), padding_option="zero") # (K_TILE_SIZE, D)
@@ -453,8 +464,28 @@ def flash_backward_triton_kv_kernel(
 
     k_indices = k_tile_index * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
 
+    if is_causal:
+        # Queries earlier than this K tile cannot attend to its keys
+        first_q_tile = (k_tile_index * K_TILE_SIZE) // Q_TILE_SIZE
+    else:
+        first_q_tile = 0
+
+    # Advance pointers to the first Q tile
+    Qi_block_ptr = Qi_block_ptr.advance(
+        (first_q_tile * Q_TILE_SIZE, 0)
+    )
+    dOi_block_ptr = dOi_block_ptr.advance(
+        (first_q_tile * Q_TILE_SIZE, 0)
+    )
+    D_block_ptr = D_block_ptr.advance(
+        (first_q_tile * Q_TILE_SIZE,)
+    )
+    L_block_ptr = L_block_ptr.advance(
+        (first_q_tile * Q_TILE_SIZE,)
+    )
+
     # iterate each Q tile
-    for i in range(tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
+    for i in range(first_q_tile, tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
         # load Qi, dOi, Di, Li
         Qi = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # (Q_TILE_SIZE, D)
         dOi = tl.load(dOi_block_ptr, boundary_check=(0,1), padding_option="zero") # (Q_TILE_SIZE, D)
@@ -516,7 +547,7 @@ def flash_backward_triton_q_kernel(
     )
 
     dOi_block_ptr = tl.make_block_ptr(
-        base=dO_ptr + stride_qb*batch_index,
+        base=dO_ptr + stride_dob*batch_index,
         shape=(N_QUERIES, D),
         strides=(stride_doq, stride_dod),
         offsets=(q_tile_index*Q_TILE_SIZE, 0),
@@ -582,7 +613,15 @@ def flash_backward_triton_q_kernel(
     q_indices = q_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
 
     # for each K tile doing the backward process
-    for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+    if is_causal:
+        # Only visit K tiles that may contain keys <= current query positions
+        num_k_tiles = tl.minimum(
+            tl.cdiv(N_KEYS, K_TILE_SIZE),
+            tl.cdiv((q_tile_index + 1) * Q_TILE_SIZE, K_TILE_SIZE),
+        )
+    else:
+        num_k_tiles = tl.cdiv(N_KEYS, K_TILE_SIZE)
+    for j in range(num_k_tiles):
         # load Kj and Vj
         Kj = tl.load(Ki_block_ptr, boundary_check=(0,1), padding_option="zero") # (K_TILE_SIZE, D)
         Vj = tl.load(Vi_block_ptr, boundary_check=(0,1), padding_option="zero") # (K_TILE_SIZE, D)
@@ -612,7 +651,7 @@ class FlashAttentionTritonFunc(torch.autograd.Function):
         N_KEYS = K.shape[1]
 
         out = torch.empty((batch_size, N_QUERIES, D), device=Q.device, dtype=Q.dtype)
-        L = torch.empty((batch_size, N_QUERIES), device=Q.device, dtype=Q.dtype)
+        L = torch.empty((batch_size, N_QUERIES), device=Q.device, dtype=torch.float32)
         scale: float = 1.0 / math.sqrt(D)
 
         flash_forward_kernel[(triton.cdiv(N_QUERIES, Q_TILE_SIZE), batch_size)](
@@ -686,7 +725,7 @@ class FlashAttentionTritonFunc(torch.autograd.Function):
             grad_out.stride(0), grad_out.stride(1), grad_out.stride(2),
             L.stride(0), L.stride(1),
             Dvs.stride(0), Dvs.stride(1),
-            dQ.stride(0), dK.stride(1), dK.stride(2),
+            dQ.stride(0), dQ.stride(1), dQ.stride(2),
             N_QUERIES, N_KEYS,
             scale,
             D,

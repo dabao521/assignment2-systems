@@ -15,6 +15,8 @@ from torch import Tensor
 
 from cs336_basics.nn_utils import softmax
 from cs336_systems.fsdp_model import ShardedLinearFunc, ShardedEmbeddingFunc
+from cs336_systems.flash_forward import FlashAttentionTritonFunc
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -519,16 +521,50 @@ class CausalMultiHeadSelfAttention(nn.Module):
             K = self.positional_encoder(K, token_positions)
 
         # Construct causal mask
-        iota = torch.arange(sequence_length, device=x.device)
-        qi = rearrange(iota, "query -> query 1")
-        kj = rearrange(iota, "key   -> 1   key")
-        causal_mask = qi >= kj  # (query, key)
-        causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
+        # iota = torch.arange(sequence_length, device=x.device)
+        # qi = rearrange(iota, "query -> query 1")
+        # kj = rearrange(iota, "key   -> 1   key")
+        # causal_mask = qi >= kj  # (query, key)
+        # causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
 
         # Shape: (..., num_heads, sequence_length, d_k)
         Q=Q.to(V.dtype)
         K=K.to(V.dtype)
-        attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        batch_size, num_heads, seq_len, head_dim = Q.shape
+        Q = Q.contiguous().reshape(batch_size * num_heads, seq_len, head_dim)
+        K = K.contiguous().reshape(batch_size * num_heads, seq_len, head_dim)
+        V = V.contiguous().reshape(batch_size * num_heads, seq_len, head_dim)
+        # attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        attn_output = FlashAttentionTritonFunc.apply(
+            Q,
+            K,
+            V,
+            True,  # is_causal
+            32,    # Q_TILE_SIZE
+            32,    # K_TILE_SIZE
+        )
+
+        # Forward correctness validation
+        with torch.no_grad():
+            expected = F.scaled_dot_product_attention(
+                Q, K, V, is_causal=True
+            )
+
+            torch.testing.assert_close(
+                attn_output,
+                expected,
+                atol=1e-2,
+                rtol=1e-2,
+            )
+            print(
+                "FlashAttention PASS, max error:",
+                (attn_output.float() - expected.float()).abs().max().item(),
+            )
+
+        # Restore batch and head dimensions
+        attn_output = attn_output.reshape(
+            batch_size, num_heads, seq_len, head_dim
+        )
 
         # Concatenate the attention output from all heads.
         # (..., sequence_length, num_heads * d_v).

@@ -371,6 +371,16 @@ def benchmark_naive_ddp() -> None:
     finally:
         volume.commit()
 
+@app.function(
+    image=image,
+    gpu="H100",
+    volumes={"/data": volume},
+    timeout=7200,
+)
+def leaderboard() -> None:
+    from cs336_systems.final_benchmark import test_timing_forward_backward
+    test_timing_forward_backward()
+
 @app.local_entrypoint()
 def main(
     mode: str,
