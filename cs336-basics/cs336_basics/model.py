@@ -16,7 +16,10 @@ from torch import Tensor
 from cs336_basics.nn_utils import softmax
 from cs336_systems.fsdp_model import ShardedLinearFunc, ShardedEmbeddingFunc
 from cs336_systems.flash_forward import FlashAttentionTritonFunc
-import torch.nn.functional as F
+#import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+from cs336_systems.checkpoint_context import recompute_context
+from contextlib import nullcontext
 
 logger = logging.getLogger(__name__)
 
@@ -259,9 +262,30 @@ class BasicsTransformerLM(nn.Module):
         # x = self.positional_encoder(embedded_tokens, positions)
         x = embedded_tokens
 
-        for layer in self.layers:
+        group_size = 1
+        for i in range(0, len(self.layers), group_size):
+            layers = self.layers[i:i + group_size]
+            def run_group(x, layers=layers):
+                for layer in layers:
+                    x = layer(x)
+                return x
+
             # (batch size, sequence_length, d_model)
-            x = layer(x)
+            # x = layer(x)
+            x = checkpoint(
+                run_group,
+                x,
+                use_reentrant=False,
+                context_fn=lambda: (nullcontext(), recompute_context()),
+            )
+            
+            #if torch.cuda.is_available():
+            #    print(
+            #        f"layer={i}, "
+            #        f"allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GiB",
+            #        flush=True,
+            #    )
+
         # (batch size, sequence_length, d_model)
         x = self.ln_final(x)
         # (batch size, sequence_length, vocab_size)
@@ -378,6 +402,9 @@ class TransformerBlock(nn.Module):
         self.ln1 = RMSNorm(d_model)
         self.ln2 = RMSNorm(d_model)
 
+        self.ln1.compile()
+        self.ln2.compile()
+
     def forward(self, x: torch.Tensor):
         """
         Args:
@@ -390,14 +417,46 @@ class TransformerBlock(nn.Module):
         # NOTE: this is a pre-norm Transformer, and differs from the original
         # description in the paper.
         # Apply the multi-head self-attention sublayer
-        x_attn = self.attn(self.ln1(x))
-        attn_sublayer_output = x + x_attn
+        #x_attn = self.attn(self.ln1(x))
+        #attn_sublayer_output = x + x_attn
 
-        # Apply the feed-forward sublayer
-        x_ffn = self.ffn(self.ln2(attn_sublayer_output))
+        ## Apply the feed-forward sublayer
+        #x_ffn = self.ffn(self.ln2(attn_sublayer_output))
+        #ffn_sublayer_output = attn_sublayer_output + x_ffn
+        #return ffn_sublayer_output
+
+
+        # self.report_mem("Before ln1")
+
+        normed = self.ln1(x)
+        # self.report_mem("After ln1")
+
+        x_attn = self.attn(normed)
+        # self.report_mem("After attention")
+
+        attn_sublayer_output = x + x_attn
+        # self.report_mem("After attention residual")
+
+        normed2 = self.ln2(attn_sublayer_output)
+        # self.report_mem("After ln2")
+
+        x_ffn = self.ffn(normed2)
+        # self.report_mem("After FFN")
+
         ffn_sublayer_output = attn_sublayer_output + x_ffn
+        # self.report_mem("After FFN residual")
+
         return ffn_sublayer_output
 
+    def report_mem(self, name: str) -> None:
+        print(
+            f"{name}: {torch.cuda.memory_allocated() / 1024**3:.2f} GiB",
+            flush=True,
+        )
+
+@torch.compile
+def swiglu_activation(x: torch.Tensor, y: torch.Tensor):
+    return silu(x) * y
 
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, d_ff: int):
@@ -407,7 +466,10 @@ class SwiGLU(nn.Module):
         self.w3 = Linear(d_model, d_ff)
 
     def forward(self, x):
-        return self.w2(silu(self.w1(x)) * self.w3(x))
+        # return self.w2(silu(self.w1(x)) * self.w3(x))
+        a = self.w1(x)
+        b = self.w3(x)
+        return self.w2(swiglu_activation(a, b))
 
 
 def scaled_dot_product_attention(
@@ -540,26 +602,26 @@ class CausalMultiHeadSelfAttention(nn.Module):
             K,
             V,
             True,  # is_causal
-            32,    # Q_TILE_SIZE
+            64,    # Q_TILE_SIZE
             32,    # K_TILE_SIZE
         )
 
         # Forward correctness validation
-        with torch.no_grad():
-            expected = F.scaled_dot_product_attention(
-                Q, K, V, is_causal=True
-            )
+        #with torch.no_grad():
+        #    expected = F.scaled_dot_product_attention(
+        #        Q, K, V, is_causal=True
+        #    )
 
-            torch.testing.assert_close(
-                attn_output,
-                expected,
-                atol=1e-2,
-                rtol=1e-2,
-            )
-            print(
-                "FlashAttention PASS, max error:",
-                (attn_output.float() - expected.float()).abs().max().item(),
-            )
+        #    torch.testing.assert_close(
+        #        attn_output,
+        #        expected,
+        #        atol=1e-2,
+        #        rtol=1e-2,
+        #    )
+        #    print(
+        #        "FlashAttention PASS, max error:",
+        #        (attn_output.float() - expected.float()).abs().max().item(),
+        #    )
 
         # Restore batch and head dimensions
         attn_output = attn_output.reshape(

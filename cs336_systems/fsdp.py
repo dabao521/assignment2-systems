@@ -4,6 +4,7 @@ from torch import nn
 import weakref
 from collections import deque
 from cs336_basics.model import Linear, Embedding
+from cs336_systems.checkpoint_context import is_recomputing
 
 class FSDPModel(nn.Module):
     def __init__(
@@ -121,6 +122,13 @@ class FSDPModel(nn.Module):
 
             self.install_fsdp_full_weight(mod, self.sync_all_gather_weights(mod, idx))
         else:
+            if is_recomputing.get():
+                if not hasattr(mod, "_fsdp_full_weight"):
+                    idx = self.fsdp_module_to_idx[mod]
+                    self.install_fsdp_full_weight(
+                        mod, self.sync_all_gather_weights(mod, idx)
+                    )
+                return
             assert mod in self.fsdp_module_to_idx
             idx = self.fsdp_module_to_idx[mod]
 
@@ -138,10 +146,11 @@ class FSDPModel(nn.Module):
     def _forward_post_hook(self, mod: nn.Module, inputs, output):
         # for the first pass:
         # 1. since forward is done, releset the fsdp full weight
-        
         # for future passes:
         # 1. releae current module's full weight.
         # 2. prefetch idx+2 if it exists
+        if is_recomputing.get():
+            return
 
         del mod._fsdp_full_weight
 
@@ -162,6 +171,9 @@ class FSDPModel(nn.Module):
         prefetch_idx = idx - 2
         if prefetch_idx >= 0:
             prefetch_mod = self.fsdp_execution_order[prefetch_idx]
+            if hasattr(prefetch_mod, "_fsdp_full_weight"):
+                return
+
             handle, flat_buffer, local_shard = self.async_all_gather_weights(prefetch_mod, prefetch_idx)
             # track this in the backward_gathers
             assert prefetch_idx not in self.backward_gathers
@@ -206,11 +218,13 @@ class FSDPModel(nn.Module):
             handle, flat_buffer, local_shard = self.backward_gathers[idx]
             handle.wait()
             full_weight = flat_buffer.reshape(mod._fsdp_original_shape)
-            self.install_fsdp_full_weight(mod, full_weight)
+            if not hasattr(mod, "_fsdp_full_weight"):
+                self.install_fsdp_full_weight(mod, full_weight)
             del self.backward_gathers[idx]
         else:
             # otherwise all gather synchronously
-            self.install_fsdp_full_weight(mod, self.sync_all_gather_weights(mod, idx))
+            if not hasattr(mod, "_fsdp_full_weight"):
+                self.install_fsdp_full_weight(mod, self.sync_all_gather_weights(mod, idx))
         # self.check_finite("pre backward hook for full weight", mod._fsdp_full_weight)
 
 

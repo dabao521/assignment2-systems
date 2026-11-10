@@ -371,15 +371,55 @@ def benchmark_naive_ddp() -> None:
     finally:
         volume.commit()
 
+#@app.function(
+#    image=image,
+#    gpu="B200:2",
+#    volumes={"/data": volume},
+#    timeout=1200,
+#)
+#def leaderboard() -> None:
+#    from cs336_systems.final_benchmark import test_timing_forward_backward
+#    test_timing_forward_backward(
+#            warmup_steps=1,
+#            benchmark_steps=3,
+#    )
+
 @app.function(
     image=image,
-    gpu="H100",
+    gpu="B200:2",
     volumes={"/data": volume},
-    timeout=7200,
+    timeout=1200,
 )
 def leaderboard() -> None:
-    from cs336_systems.final_benchmark import test_timing_forward_backward
-    test_timing_forward_backward()
+    import subprocess
+
+    subprocess.run(
+        [
+            "nsys", "profile",
+            "--trace=cuda,nvtx,osrt",
+            "--sample=none",
+            "--cpuctxsw=none",
+            "--force-overwrite=true",
+            "--output=/data/training_profile",
+            "python", "-m", "cs336_systems.final_benchmark",
+        ],
+        cwd="/app",
+        check=True,
+    )
+
+    with open("/data/kernel_stats.txt", "w") as f:
+        subprocess.run(
+            [
+                "nsys", "stats",
+                "--report", "cuda_gpu_kern_sum",
+                "/data/training_profile.nsys-rep",
+            ],
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
+
+    volume.commit()
 
 @app.local_entrypoint()
 def main(
