@@ -4,8 +4,9 @@ import torch
 # from cs336_systems.naive_ddp import NaiveDDPModel
 from cs336_systems.ddp_overlap_model import DdpOverlapModel
 from cs336_systems.state_shard_optimizer import StateShardOptimizer
-
-
+from cs336_systems.fsdp import FSDPModel
+from cs336_basics.model import Linear, Embedding
+import torch.distributed as dist
 
 def get_flashattention_autograd_function_pytorch() -> type:
     from cs336_systems.flash_forward import FlashAttentionForwardPyTorchFunc
@@ -96,7 +97,7 @@ def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) 
         Instance of an FSDP class.
     """
     # For example: return FSDP(module, compute_dtype=compute_dtype)
-    raise NotImplementedError
+    return FSDPModel(module, compute_dtype)
 
 
 def fsdp_on_after_backward(fsdp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
@@ -111,7 +112,7 @@ def fsdp_on_after_backward(fsdp_model: torch.nn.Module, optimizer: torch.optim.O
             Optimizer being used with the FSDP-wrapped model.
     """
     # For example: fsdp_model.finish_gradient_synchronization()
-    raise NotImplementedError
+    return fsdp_model.finish_gradient_synchronization()
 
 
 def fsdp_gather_full_params(fsdp_model: torch.nn.Module) -> dict[str, torch.Tensor]:
@@ -125,8 +126,28 @@ def fsdp_gather_full_params(fsdp_model: torch.nn.Module) -> dict[str, torch.Tens
     Returns:
         State dictionary mapping parameter names to full (unsharded) tensors.
     """
-    raise NotImplementedError
-
+    output = {}
+    for mod_path, mod in fsdp_model.named_modules():
+        if isinstance(mod, (Linear, Embedding)):
+            for name, param in mod.named_parameters():
+                flat_buffer = torch.empty(
+                    mod._fsdp_original_numel,
+                    device=mod.weight.data.device,
+                    dtype=mod.weight.data.dtype,
+                )
+                dist.all_gather_into_tensor(
+                    flat_buffer,
+                    mod.weight.data,
+                )
+                key = f"{mod_path}.{name}".removeprefix("module.")
+                # print(f"output key={key}, linear or embedding")
+                output[key] = flat_buffer.reshape(mod._fsdp_original_shape)
+        else:
+            for name, param in mod.named_parameters(recurse=False):
+                key = f"{mod_path}.{name}".removeprefix("module.")
+                # print(f"output key={key}, NOT linear or embedding")
+                output[key] = param.data
+    return output
 
 def get_sharded_optimizer(params, optimizer_cls: type[torch.optim.Optimizer], **kwargs) -> torch.optim.Optimizer:
     """

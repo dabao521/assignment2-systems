@@ -14,6 +14,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.nn_utils import softmax
+from cs336_systems.fsdp_model import ShardedLinearFunc, ShardedEmbeddingFunc
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,13 @@ class Linear(nn.Module):
         )
 
     def forward(self, x: Float[Tensor, " ... d_in"]) -> Float[Tensor, " ... d_out"]:
+        if hasattr(self, "_fsdp_enabled"):
+            return ShardedLinearFunc.apply(x, self.weight, self)
         return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
 
     def extra_repr(self):
+        if hasattr(self, "_fsdp_enabled"):
+            return f"shape={self.weight.shape}"
         return f"d_out={self.weight.shape[0]}, d_in={self.weight.shape[1]}"
 
 
@@ -51,9 +56,13 @@ class Embedding(nn.Module):
         )
 
     def forward(self, token_ids: Int[Tensor, " ..."]) -> Float[Tensor, " ... d_model"]:
+        if hasattr(self, "_fsdp_enabled"):
+            return ShardedEmbeddingFunc.apply(token_ids, self.weight, self)
         return self.weight[token_ids, :]
 
     def extra_repr(self):
+        if hasattr(self, "_fsdp_enabled"):
+            return f"shape={self.weight.shape}"
         return f"vocab_size={self.weight.shape[0]}, d={self.weight.shape[1]}"
 
 
@@ -517,6 +526,8 @@ class CausalMultiHeadSelfAttention(nn.Module):
         causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
 
         # Shape: (..., num_heads, sequence_length, d_k)
+        Q=Q.to(V.dtype)
+        K=K.to(V.dtype)
         attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
 
         # Concatenate the attention output from all heads.

@@ -12,6 +12,7 @@ import time
 import torch.optim as optim
 from cs336_basics.model import BasicsTransformerLM
 # from cs336_systems.state_shard_optimizer import StateShardOptimizer
+from cs336_systems.fsdp import FSDPModel
 
 def get_data(batch_size, context_len, vocab_size):
     data = torch.randint(0, vocab_size, (batch_size, context_len))
@@ -66,16 +67,17 @@ def run_benchmark(rank, world_size, data, targets, vocab_size, context_length):
         num_heads=32,
         rope_theta=10000.0,
     ).to(device)
+    model = FSDPModel(model).to(device)
 
-    # optimizer_cls = optim.AdamW
-    # optimizer = StateShardOptimizer(
-    #     model.parameters(),
-    #     optimizer_cls,
-    #     lr=0.1,
-    #     weight_decay=0.1,
-    #     betas=(0.9, 0.999),
-    #     eps=1e-8,
-    # )
+    #optimizer_cls = optim.AdamW
+    #optimizer = StateShardOptimizer(
+    #    model.parameters(),
+    #    optimizer_cls,
+    #    lr=0.1,
+    #    weight_decay=0.1,
+    #    betas=(0.9, 0.999),
+    #    eps=1e-8,
+    #)
     optimizer = optim.AdamW(
         model.parameters(),
         lr=0.1,

@@ -169,12 +169,22 @@ def _test_fsdp_correctness(rank: int, world_size: int, compute_dtype):
         full_params = fsdp_gather_full_params(fsdp_model)
         for name, np_param in non_parallel_model.named_parameters():
             fsdp_full = full_params[name]
+            # print(f"Validating param name={name}, expected shape={np_param.data.shape}, actual shape={fsdp_full.shape}")
             if compute_dtype is None:
                 assert torch.allclose(np_param.data, fsdp_full, atol=1e-6, rtol=1e-4), (
                     f"Step {step}: Parameter {name} mismatch. Max diff: {(np_param.data - fsdp_full).abs().max().item()}"
                 )
             else:
-                assert torch.allclose(np_param.data, fsdp_full, atol=1e-4, rtol=1e-4), (
+                all_close = torch.allclose(np_param.data, fsdp_full, atol=1e-4, rtol=1e-4)
+                if not all_close:
+                    print("Reference:", np_param.data)
+                    print("FSDP:", fsdp_full)
+
+                    print("Reference NaN:", torch.isnan(np_param.data).any())
+                    print("FSDP NaN:", torch.isnan(fsdp_full).any())
+                    print(f"reference dtype={np_param.data.dtype}, fsdp dtype={fsdp_full.dtype}")
+
+                assert all_close , (
                     f"Step {step}: Parameter {name} mismatch. Max diff: {(np_param.data - fsdp_full).abs().max().item()}"
                 )
 
